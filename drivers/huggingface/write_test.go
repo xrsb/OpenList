@@ -252,6 +252,10 @@ func TestWriteLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(finalList) != 0 {
-		t.Fatalf("repo should be empty after cleanup, got: %v", finalList)
+		left := []string{}
+		for _, o := range finalList {
+			left = append(left, o.GetName())
+		}
+		t.Fatalf("repo should be empty after cleanup, left: %v", left)
 	}
 }

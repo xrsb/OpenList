@@ -11,7 +11,6 @@ import (
 	stdpath "path"
 	"strings"
 
-	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
@@ -64,24 +63,39 @@ func (d *HuggingFace) listTree(ctx context.Context, path string, recursive bool)
 	var out []TreeEntry
 	cursor := ""
 	for {
-		req := d.client.R().SetContext(ctx).
-			SetQueryParams(map[string]string{
-				"recursive": fmt.Sprintf("%v", recursive),
-				"expand":    "false",
-				"limit":     "1000",
-			})
-		if cursor != "" {
-			req.SetQueryParam("cursor", cursor)
+		url := d.apiURL() + "/tree/" + d.Revision
+		if path != "" {
+			url += "/" + escapePath(path)
 		}
-		res, err := req.Get(url)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return nil, err
 		}
-		if res.StatusCode() != 200 {
-			return nil, fmt.Errorf("huggingface list failed: %s", res.Status())
+		if t := strings.TrimSpace(d.Token); t != "" {
+			req.Header.Set("Authorization", "Bearer "+t)
+		}
+		q := req.URL.Query()
+		q.Set("recursive", fmt.Sprintf("%v", recursive))
+		q.Set("expand", "false")
+		q.Set("limit", "1000")
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		req.URL.RawQuery = q.Encode()
+		res, err := d.client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		rb, readErr := io.ReadAll(res.Body)
+		res.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if res.StatusCode != 200 {
+			return nil, fmt.Errorf("huggingface list failed: %s: %s", res.Status, string(rb))
 		}
 		var page []TreeEntry
-		if err := utils.Json.Unmarshal(res.Body(), &page); err != nil {
+		if err := json.Unmarshal(rb, &page); err != nil {
 			return nil, err
 		}
 		out = append(out, page...)
@@ -89,8 +103,8 @@ func (d *HuggingFace) listTree(ctx context.Context, path string, recursive bool)
 			break
 		}
 		cursor = firstNonEmpty(
-			res.Header().Get("X-Next-Cursor"),
-			res.Header().Get("X-Link-Cursor"),
+			res.Header.Get("X-Next-Cursor"),
+			res.Header.Get("X-Link-Cursor"),
 		)
 		if cursor == "" {
 			break
@@ -144,7 +158,7 @@ func (d *HuggingFace) commit(ctx context.Context, ops []commitOp, summary string
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	res, err := base.HttpClient.Do(req)
+	res, err := d.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -165,7 +179,7 @@ func (d *HuggingFace) newRequest(ctx context.Context, method, url string, body [
 	if t := strings.TrimSpace(d.Token); t != "" {
 		req.Header.Set("Authorization", "Bearer "+t)
 	}
-	req.Header.Set("User-Agent", base.UserAgent)
+	req.Header.Set("User-Agent", userAgent)
 	return req, nil
 }
 
@@ -183,7 +197,8 @@ func (d *HuggingFace) preupload(ctx context.Context, path string, size int64, sa
 	if err != nil {
 		return "", err
 	}
-	res, err := base.HttpClient.Do(req)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := d.client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -228,7 +243,7 @@ func (d *HuggingFace) lfsBatch(ctx context.Context, oid string, size int64) (map
 	}
 	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
 	req.Header.Set("Accept", "application/vnd.git-lfs+json")
-	res, err := base.HttpClient.Do(req)
+	res, err := d.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -268,8 +283,8 @@ func (d *HuggingFace) lfsUpload(ctx context.Context, action LFSAction, r io.Read
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("User-Agent", base.UserAgent)
-	res, err := base.HttpClient.Do(req)
+	req.Header.Set("User-Agent", userAgent)
+	res, err := d.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -310,7 +325,7 @@ func (d *HuggingFace) pathsInfoMany(ctx context.Context, paths []string) ([]*Tre
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := base.HttpClient.Do(req)
+	res, err := d.client.Do(req)
 	if err != nil {
 		return nil, err
 	}

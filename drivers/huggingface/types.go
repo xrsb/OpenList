@@ -1,6 +1,9 @@
 package huggingface
 
-const Endpoint = "https://huggingface.co"
+const (
+	Endpoint  = "https://huggingface.co"
+	userAgent = "OpenList-HuggingFace-Driver/1.0"
+)
 
 // repoTypeURLPrefix maps a repo type to its URL prefix; models have none.
 var repoTypeURLPrefix = map[string]string{

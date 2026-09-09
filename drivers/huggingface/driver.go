@@ -14,18 +14,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/go-resty/resty/v2"
 	"github.com/pkg/errors"
 )
 
 type HuggingFace struct {
 	model.Storage
 	Addition
-	client *resty.Client
+	client *http.Client
 }
 
 /* ---------- meta ---------- */
@@ -55,24 +53,29 @@ func (d *HuggingFace) Init(ctx context.Context) error {
 		d.Revision = "main"
 	}
 	d.RootFolderPath = utils.FixAndCleanPath(d.RootFolderPath)
-	d.client = base.NewRestyClient()
-	if t := strings.TrimSpace(d.Token); t != "" {
-		d.client.SetHeader("Authorization", "Bearer "+t)
-	}
+	d.client = &http.Client{Timeout: 48 * time.Hour}
 
 	// verify the repository is reachable (existence / token permission)
-	res, err := d.client.R().SetContext(ctx).Get(d.apiURL())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL(), nil)
+	if err != nil {
+		return errors.Wrap(err, "huggingface: cannot build request")
+	}
+	if t := strings.TrimSpace(d.Token); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	res, err := d.client.Do(req)
 	if err != nil {
 		return errors.Wrap(err, "huggingface: cannot reach the Hub API")
 	}
-	switch res.StatusCode() {
+	res.Body.Close()
+	switch res.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
 		return fmt.Errorf("huggingface: repository %s (type %s) does not exist, or is private and no token was provided", d.RepoID, d.RepoType)
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("huggingface: access to %s denied (status %d): check token and repo visibility", d.RepoID, res.StatusCode())
+		return fmt.Errorf("huggingface: access to %s denied (status %d): check token and repo visibility", d.RepoID, res.StatusCode)
 	default:
-		return fmt.Errorf("huggingface: unexpected status %d from the Hub API", res.StatusCode())
+		return fmt.Errorf("huggingface: unexpected status %d from the Hub API", res.StatusCode)
 	}
 	return nil
 }
@@ -106,7 +109,7 @@ func (d *HuggingFace) List(ctx context.Context, dir model.Obj, args model.ListAr
 	out := make([]model.Obj, 0, len(entries))
 	for _, e := range entries {
 		name := stdpath.Base(e.Path)
-		if name == ".gitkeep" {
+		if name == ".gitkeep" || name == ".gitattributes" {
 			continue
 		}
 		out = append(out, &model.Object{
@@ -210,8 +213,8 @@ func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 
 	sample := make([]byte, 0, 512)
 	if size > 0 {
-		sample = make([]byte, 512)
-		if _, err := io.ReadFull(tmp, sample); err != nil {
+		sample, err = io.ReadAll(io.LimitReader(tmp, 512))
+		if err != nil {
 			return err
 		}
 		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
@@ -416,7 +419,7 @@ func (d *HuggingFace) downloadFileContent(ctx context.Context, path string) ([]b
 	if err != nil {
 		return nil, err
 	}
-	res, err := base.HttpClient.Do(req)
+	res, err := d.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
