@@ -270,3 +270,77 @@ func TestWriteLifecycle(t *testing.T) {
 		t.Fatalf("repo should be empty after cleanup, left: %v", left)
 	}
 }
+
+// countLFSFile returns the number of LFS objects currently stored in the
+// repo (GET /lfs-files). Used to prove that Remove reclaims storage quota.
+func countLFSFiles(t *testing.T, d *HuggingFace) int {
+	t.Helper()
+	req, err := d.newRequest(context.Background(), "GET", d.apiURL()+"/lfs-files", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		rb, _ := io.ReadAll(res.Body)
+		t.Fatalf("lfs-files: %s: %s", res.Status, string(rb))
+	}
+	var files []struct {
+		OID string `json:"oid"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&files); err != nil {
+		t.Fatal(err)
+	}
+	return len(files)
+}
+
+// TestRemoveReclaimsLFSSpace verifies the end-to-end storage reclaim: after
+// an LFS file is uploaded it shows up in lfs-files, and Remove deletes the
+// tree entry AND asynchronously purges the blob (lfs-files count goes to 0).
+func TestRemoveReclaimsLFSSpace(t *testing.T) {
+	ctx := context.Background()
+	token := writeToken(t)
+	repo := userTestRepo(t, token)
+
+	d := &HuggingFace{}
+	d.Addition.RepoType = "model"
+	d.Addition.RepoID = repo
+	d.Addition.Revision = "main"
+	d.Addition.Token = token
+	if err := d.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	root := &model.Object{Name: "/", IsFolder: true, Path: "/"}
+	big := make([]byte, 6<<20)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Put(ctx, root, makeStream(t, ctx, "big.bin", big), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for countLFSFiles(t, d) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("lfs-files did not reflect the upload within 20s")
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if err := d.Remove(ctx, &model.Object{Name: "big.bin", Path: "/big.bin"}); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// the blob purge runs asynchronously; poll until quota is released
+	deadline = time.Now().Add(30 * time.Second)
+	for countLFSFiles(t, d) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("LFS object still allocated 30s after Remove")
+		}
+		time.Sleep(1 * time.Second)
+	}
+}

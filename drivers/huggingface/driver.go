@@ -19,6 +19,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 )
 
 type HuggingFace struct {
@@ -314,15 +315,67 @@ func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 }
 
 func (d *HuggingFace) Remove(ctx context.Context, obj model.Obj) error {
+	path := d.repoPath(obj.GetPath())
+
+	// Collect the LFS oids of the subtree BEFORE the delete commit: once the
+	// tree entries are gone there is no way to learn which blobs they
+	// referenced, and orphaned LFS objects keep occupying storage quota.
+	var oids []string
+	if obj.IsDir() {
+		oids, _ = d.collectLFS(ctx, obj)
+	} else if info, err := d.pathsInfo(ctx, path); err == nil && info != nil && info.LFS != nil && info.LFS.OID != "" {
+		oids = []string{info.LFS.OID}
+	}
+
 	key := "deletedFile"
 	if obj.IsDir() {
 		key = "deletedFolder"
 	}
-	path := d.repoPath(obj.GetPath())
-	return d.commit(ctx, []commitOp{{
+	if err := d.commit(ctx, []commitOp{{
 		Key:   key,
 		Value: map[string]any{"path": path},
-	}}, "openlist delete "+path)
+	}}, "openlist delete "+path); err != nil {
+		// the tree still exists, so any collected oids are still referenced;
+		// do not reclaim storage for them
+		return err
+	}
+
+	// Reclaim storage in the background; never block or fail the delete.
+	if len(oids) > 0 {
+		go d.deleteLFSObjects(context.Background(), oids)
+	}
+	return nil
+}
+
+// collectLFS walks a folder subtree and returns the sha256 oids of every LFS
+// file beneath it. Best-effort: entries that disappear mid-walk are skipped.
+func (d *HuggingFace) collectLFS(ctx context.Context, folder model.Obj) ([]string, error) {
+	var oids []string
+	var walk func(model.Obj) error
+	walk = func(o model.Obj) error {
+		if !o.IsDir() {
+			info, err := d.pathsInfo(ctx, d.repoPath(o.GetPath()))
+			if err == nil && info != nil && info.LFS != nil && info.LFS.OID != "" {
+				oids = append(oids, info.LFS.OID)
+			}
+			return nil
+		}
+		objs, err := d.List(ctx, o, model.ListArgs{})
+		if err != nil {
+			return err
+		}
+		for _, c := range objs {
+			if err := walk(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(folder); err != nil {
+		// keep whatever we collected; removal must not be blocked
+		log.Errorf("huggingface: collect lfs oids under %q: %v", folder.GetPath(), err)
+	}
+	return oids, nil
 }
 
 func (d *HuggingFace) Rename(ctx context.Context, srcObj model.Obj, newName string) (model.Obj, error) {

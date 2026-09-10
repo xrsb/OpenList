@@ -12,10 +12,12 @@ import (
 	stdpath "path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	log "github.com/sirupsen/logrus"
 )
 
 // repoPath joins the mount-root with p and returns the repo-relative path
@@ -148,6 +150,43 @@ func renameOp(info *TreeEntry, dst string) commitOp {
 		"path":    dst,
 		"oldPath": info.Path,
 	}}
+}
+
+// deleteLFSObjects permanently deletes the given LFS objects from the
+// repository and rewrites history, so storage quota is released immediately.
+// Mirrors huggingface_hub's permanently_delete_lfs_files (POST
+// .../lfs-files/batch with {"deletions":{"sha":[...],"rewriteHistory":true}}).
+// Best-effort by design: it runs after the delete commit and must never fail
+// the user-facing operation; errors are logged only. A 404 means some oids
+// were already gone (e.g. concurrent delete) — storage is already reclaimed.
+func (d *HuggingFace) deleteLFSObjects(ctx context.Context, oids []string) {
+	if len(oids) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	payload, _ := json.Marshal(map[string]any{
+		"deletions": map[string]any{
+			"sha":            oids,
+			"rewriteHistory": true,
+		},
+	})
+	req, err := d.newRequest(ctx, "POST", d.apiURL()+"/lfs-files/batch", payload)
+	if err != nil {
+		log.Errorf("huggingface: delete lfs objects: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := d.client.Do(req)
+	if err != nil {
+		log.Errorf("huggingface: delete lfs objects (%d file(s)): %v", len(oids), err)
+		return
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 && res.StatusCode != 404 {
+		rb, _ := io.ReadAll(res.Body)
+		log.Errorf("huggingface: delete lfs objects (%d file(s)): %s: %s", len(oids), res.Status, string(rb))
+	}
 }
 
 // commitPayload serializes ops as ndjson lines with a header line.
