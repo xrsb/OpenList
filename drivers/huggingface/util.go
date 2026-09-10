@@ -204,7 +204,11 @@ func (d *HuggingFace) newRequest(ctx context.Context, method, url string, body [
 	return req, nil
 }
 
-// preupload asks the Hub how a file should be uploaded. Returns "regular" or "lfs".
+// preupload queries the Hub for the upload mode of a file: "regular" (small
+// files stored as git blobs) or "lfs". Mirrors huggingface_hub's payload —
+// path/sample/size, no sha — and only the uploadMode is used; the response's
+// shouldIgnore field is a gitignore verdict and we never send a gitIgnore
+// payload, so it is intentionally ignored here.
 func (d *HuggingFace) preupload(ctx context.Context, path string, size int64, sample []byte) (string, error) {
 	payload := map[string]any{
 		"files": []map[string]any{{

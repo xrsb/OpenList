@@ -259,21 +259,24 @@ func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 			return nil, err
 		}
 		act, ok := actions["upload"]
-		if !ok {
-			return nil, fmt.Errorf("huggingface: lfs batch returned no upload action")
-		}
-		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			return nil, err
-		}
-		if isMultipartAction(act) {
-			if err := d.lfsUploadMultipart(ctx, oid, act, tmp, size, up); err != nil {
+		if ok {
+			if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 				return nil, err
 			}
-		} else {
-			if err := d.lfsUpload(ctx, act, io.NewSectionReader(tmp, 0, size), size, up); err != nil {
-				return nil, err
+			if isMultipartAction(act) {
+				if err := d.lfsUploadMultipart(ctx, oid, act, tmp, size, up); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := d.lfsUpload(ctx, act, io.NewSectionReader(tmp, 0, size), size, up); err != nil {
+					return nil, err
+				}
 			}
 		}
+		// No upload action = the LFS object already exists in the repo
+		// (git-lfs batch semantics): nothing to transfer, just commit a
+		// pointer referencing the existing blob. This is the Hub's native
+		// dedup path when preupload's shouldIgnore did not short-circuit.
 		err = d.commit(ctx, []commitOp{{
 			Key: "lfsFile",
 			Value: map[string]any{

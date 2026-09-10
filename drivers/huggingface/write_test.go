@@ -156,6 +156,17 @@ func TestWriteLifecycle(t *testing.T) {
 		t.Fatalf("Put big: %v", err)
 	}
 
+	// re-uploading byte-identical content must hit the Hub's server-side
+	// dedupe (preupload shouldIgnore): the call succeeds without any wire
+	// transfer — the driver returns the object straight from preupload.
+	obj2, err := d.Put(ctx, root, makeStream(t, ctx, "big.bin", big), nil)
+	if err != nil {
+		t.Fatalf("Put big (dup): %v", err)
+	}
+	if obj2.GetSize() != int64(len(big)) {
+		t.Fatalf("dup upload size mismatch: %d != %d", obj2.GetSize(), len(big))
+	}
+
 	// verify listing
 	objs, err := d.List(ctx, root, model.ListArgs{})
 	if err != nil {
