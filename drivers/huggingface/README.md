@@ -15,6 +15,11 @@ dataset / space repos (public or private) — as a storage in OpenList.
 
 > Write access requires a token with the **write** permission; read-only
 > browsing of public repos works without one.
+>
+> **Private repos**: enable the storage's **Web Proxy** option in OpenList. The
+> driver always resolves private files with the `Authorization` header, and
+> only the proxy path forwards that header — a direct 302 would leak an
+> unauthenticated redirect to the client.
 
 ## Capabilities
 
