@@ -129,6 +129,24 @@ type commitOp struct {
 	Value map[string]any
 }
 
+// renameOp builds a commit op for a move/rename of one file (oldPath
+// semantics of the Hub commit API). LFS entries keep their blob oid.
+func renameOp(info *TreeEntry, dst string) commitOp {
+	if info.LFS != nil && info.LFS.OID != "" {
+		return commitOp{Key: "lfsFile", Value: map[string]any{
+			"path":    dst,
+			"oldPath": info.Path,
+			"algo":    "sha256",
+			"oid":     info.LFS.OID,
+			"size":    info.LFS.Size,
+		}}
+	}
+	return commitOp{Key: "file", Value: map[string]any{
+		"path":    dst,
+		"oldPath": info.Path,
+	}}
+}
+
 // commitPayload serializes ops as ndjson lines with a header line.
 func commitPayload(ops []commitOp, summary string) ([]byte, error) {
 	var b strings.Builder
@@ -310,7 +328,8 @@ func (d *HuggingFace) pathsInfo(ctx context.Context, path string) (*TreeEntry, e
 			return e, nil
 		}
 	}
-	return nil, fmt.Errorf("path %q not found in paths-info response", path)
+	// the path does not exist in this revision; callers decide the error
+	return nil, nil
 }
 
 // pathsInfoMany fetches metadata (incl. LFS info) for many repo paths at once.
@@ -331,6 +350,10 @@ func (d *HuggingFace) pathsInfoMany(ctx context.Context, paths []string) ([]*Tre
 	}
 	defer res.Body.Close()
 	rb, _ := io.ReadAll(res.Body)
+	if res.StatusCode == 404 {
+		// the Hub reports 404 for paths that do not exist in this revision
+		return nil, nil
+	}
 	if res.StatusCode != 200 {
 		return nil, fmt.Errorf("huggingface paths-info failed: %s: %s", res.Status, string(rb))
 	}

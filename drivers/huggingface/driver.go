@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
+	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/pkg/errors"
@@ -42,9 +43,7 @@ func (d *HuggingFace) Init(ctx context.Context) error {
 		return errors.New("repo_id must be in the form 'namespace/name'")
 	}
 	switch d.RepoType {
-	case "model":
-	case "dataset":
-	case "space":
+	case "model", "dataset", "space":
 	default:
 		return errors.New("repo_type must be one of model, dataset, space")
 	}
@@ -89,7 +88,7 @@ func (d *HuggingFace) GetRoot(ctx context.Context) (model.Obj, error) {
 		d.RootFolderPath = "/"
 	}
 	return &model.Object{
-		Name:     d.RootFolderPath,
+		Name:     "root",
 		IsFolder: true,
 		Path:     d.RootFolderPath,
 	}, nil
@@ -100,7 +99,7 @@ func (d *HuggingFace) GetRoot(ctx context.Context) (model.Obj, error) {
 func (d *HuggingFace) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
 	entries, err := d.listTree(ctx, d.repoPath(dir.GetPath()), false)
 	if err != nil {
-		// an implicit Hf folder may not exist yet -> treat as empty
+		// an implicit Hub folder may not exist yet -> treat as empty
 		if strings.Contains(err.Error(), "404") {
 			return []model.Obj{}, nil
 		}
@@ -108,6 +107,9 @@ func (d *HuggingFace) List(ctx context.Context, dir model.Obj, args model.ListAr
 	}
 	out := make([]model.Obj, 0, len(entries))
 	for _, e := range entries {
+		if e.Type != "file" && e.Type != "directory" {
+			continue
+		}
 		name := stdpath.Base(e.Path)
 		if name == ".gitkeep" || name == ".gitattributes" {
 			continue
@@ -115,8 +117,6 @@ func (d *HuggingFace) List(ctx context.Context, dir model.Obj, args model.ListAr
 		out = append(out, &model.Object{
 			Name:     name,
 			Size:     e.Size,
-			Modified: time.Unix(0, 0).UTC(),
-			Ctime:    time.Unix(0, 0).UTC(),
 			IsFolder: e.Type == "directory",
 			Path:     utils.FixAndCleanPath(stdpath.Join(dir.GetPath(), name)),
 		})
@@ -138,26 +138,44 @@ func (d *HuggingFace) Get(ctx context.Context, path string) (model.Obj, error) {
 	if err != nil {
 		return nil, err
 	}
+	if info == nil {
+		// the Hub answered 404: the path does not exist in this revision
+		return nil, errs.ObjectNotFound
+	}
+	if info.Type == "directory" {
+		return d.dirObj(path), nil
+	}
 	return &model.Object{
 		Name:     stdpath.Base(info.Path),
 		Size:     info.Size,
-		Modified: time.Unix(0, 0).UTC(),
-		Ctime:    time.Unix(0, 0).UTC(),
-		IsFolder: info.Type == "directory",
+		IsFolder: false,
 		Path:     utils.FixAndCleanPath(path),
 	}, nil
 }
 
+// newObj builds a model.Obj; Modified/Ctime stay zero because the Hub does not
+// expose per-file times without an extra expanded tree query.
+func (d *HuggingFace) dirObj(path string) model.Obj {
+	return &model.Object{
+		Name:     stdpath.Base(path),
+		IsFolder: true,
+		Path:     utils.FixAndCleanPath(path),
+	}
+}
+
 /* ---------- write ---------- */
 
-func (d *HuggingFace) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
+func (d *HuggingFace) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
 	// Hub folders are implicit: write a .gitkeep placeholder so the folder
 	// actually appears in listings (same trick as the GitHub driver).
 	path := d.repoPath(stdpath.Join(parentDir.GetPath(), dirName, ".gitkeep"))
-	return d.commit(ctx, []commitOp{{
+	if err := d.commit(ctx, []commitOp{{
 		Key:   "file",
 		Value: map[string]any{"path": path, "content": ""},
-	}}, "OpenList mkdir "+path)
+	}}, "openlist mkdir "+path); err != nil {
+		return nil, err
+	}
+	return d.dirObj(stdpath.Join(parentDir.GetPath(), dirName)), nil
 }
 
 // progressReader wraps a stream and reports upload progress; safe with a nil
@@ -202,12 +220,12 @@ func (d *HuggingFace) spoolToTemp(src io.Reader, size int64, up driver.UpdatePro
 	return tmp, hex.EncodeToString(hasher.Sum(nil)), n, nil
 }
 
-func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
+func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	path := d.repoPath(stdpath.Join(dstDir.GetPath(), stream.GetName()))
 
 	tmp, oid, size, err := d.spoolToTemp(stream, stream.GetSize(), up)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { tmp.Close(); os.Remove(tmp.Name()) }()
 
@@ -215,35 +233,35 @@ func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 	if size > 0 {
 		sample, err = io.ReadAll(io.LimitReader(tmp, 512))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	mode, err := d.preupload(ctx, path, size, sample)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	switch mode {
 	case "lfs":
 		actions, err := d.lfsBatch(ctx, oid, size)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		act, ok := actions["upload"]
 		if !ok {
-			return fmt.Errorf("huggingface lfs batch returned no upload action")
+			return nil, fmt.Errorf("huggingface: lfs batch returned no upload action")
 		}
 		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-			return err
+			return nil, err
 		}
 		if err := d.lfsUpload(ctx, act, io.NewSectionReader(tmp, 0, size), size, up); err != nil {
-			return err
+			return nil, err
 		}
-		return d.commit(ctx, []commitOp{{
+		err = d.commit(ctx, []commitOp{{
 			Key: "lfsFile",
 			Value: map[string]any{
 				"path": path,
@@ -251,23 +269,32 @@ func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 				"algo": "sha256",
 				"size": size,
 			},
-		}}, "OpenList upload "+path)
+		}}, "openlist upload "+path)
 	case "regular":
 		content, err := io.ReadAll(tmp)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		return d.commit(ctx, []commitOp{{
+		err = d.commit(ctx, []commitOp{{
 			Key: "file",
 			Value: map[string]any{
 				"path":     path,
 				"content":  base64.StdEncoding.EncodeToString(content),
 				"encoding": "base64",
 			},
-		}}, "OpenList upload "+path)
+		}}, "openlist upload "+path)
 	default:
-		return fmt.Errorf("huggingface preupload returned unknown mode %q", mode)
+		return nil, fmt.Errorf("huggingface: preupload returned unknown mode %q", mode)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return &model.Object{
+		Name:     stream.GetName(),
+		Size:     size,
+		IsFolder: false,
+		Path:     utils.FixAndCleanPath(stdpath.Join(dstDir.GetPath(), stream.GetName())),
+	}, nil
 }
 
 func (d *HuggingFace) Remove(ctx context.Context, obj model.Obj) error {
@@ -279,22 +306,28 @@ func (d *HuggingFace) Remove(ctx context.Context, obj model.Obj) error {
 	return d.commit(ctx, []commitOp{{
 		Key:   key,
 		Value: map[string]any{"path": path},
-	}}, "OpenList delete "+path)
+	}}, "openlist delete "+path)
 }
 
-func (d *HuggingFace) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
+func (d *HuggingFace) Rename(ctx context.Context, srcObj model.Obj, newName string) (model.Obj, error) {
 	src := d.repoPath(srcObj.GetPath())
 	dst := d.repoPath(stdpath.Join(stdpath.Dir(srcObj.GetPath()), newName))
-	return d.moveOrRename(ctx, srcObj.IsDir(), src, dst)
+	if err := d.moveOrRename(ctx, srcObj.IsDir(), src, dst); err != nil {
+		return nil, err
+	}
+	return d.objByName(srcObj, stdpath.Join(stdpath.Dir(srcObj.GetPath()), newName)), nil
 }
 
-func (d *HuggingFace) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
+func (d *HuggingFace) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
 	src := d.repoPath(srcObj.GetPath())
 	dst := d.repoPath(stdpath.Join(dstDir.GetPath(), srcObj.GetName()))
 	if strings.HasPrefix(dst, src+"/") {
-		return errors.New("cannot move a folder into itself")
+		return nil, errors.New("cannot move a folder into itself")
 	}
-	return d.moveOrRename(ctx, srcObj.IsDir(), src, dst)
+	if err := d.moveOrRename(ctx, srcObj.IsDir(), src, dst); err != nil {
+		return nil, err
+	}
+	return d.objByName(srcObj, stdpath.Join(dstDir.GetPath(), srcObj.GetName())), nil
 }
 
 // moveOrRename renames on the Hub via one commit; folders move every file
@@ -303,88 +336,28 @@ func (d *HuggingFace) moveOrRename(ctx context.Context, isDir bool, src, dst str
 	if src == dst {
 		return nil
 	}
-	var infos []*TreeEntry
-	if isDir {
-		entries, err := d.listTree(ctx, src, true)
-		if err != nil {
-			return err
-		}
-		paths := make([]string, 0, len(entries))
-		for _, e := range entries {
-			if e.Type == "file" {
-				paths = append(paths, e.Path)
-			}
-		}
-		infos, err = d.pathsInfoMany(ctx, paths)
-		if err != nil {
-			return err
-		}
-	} else {
-		info, err := d.pathsInfo(ctx, src)
-		if err != nil {
-			return err
-		}
-		if info.Type == "directory" {
-			return d.moveOrRename(ctx, true, src, dst)
-		}
-		infos = []*TreeEntry{info}
+	infos, err := d.collectEntries(ctx, isDir, src)
+	if err != nil {
+		return err
 	}
-
 	ops := make([]commitOp, 0, len(infos))
 	for _, info := range infos {
 		rel := strings.TrimPrefix(info.Path, src)
 		ops = append(ops, renameOp(info, dst+rel))
 	}
-	return d.commit(ctx, ops, "OpenList move "+src+" -> "+dst)
+	return d.commit(ctx, ops, "openlist move "+src)
 }
 
-func renameOp(info *TreeEntry, newPath string) commitOp {
-	if info.LFS != nil && info.LFS.OID != "" {
-		return commitOp{Key: "lfsFile", Value: map[string]any{
-			"path":    newPath,
-			"oldPath": info.Path,
-			"algo":    "sha256",
-			"oid":     info.LFS.OID,
-			"size":    info.LFS.Size,
-		}}
-	}
-	return commitOp{Key: "file", Value: map[string]any{
-		"path":    newPath,
-		"oldPath": info.Path,
-	}}
-}
-
-func (d *HuggingFace) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
+func (d *HuggingFace) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
 	src := d.repoPath(srcObj.GetPath())
 	dst := d.repoPath(stdpath.Join(dstDir.GetPath(), srcObj.GetName()))
 	if strings.HasPrefix(dst, src+"/") {
-		return errors.New("cannot copy a folder into itself")
+		return nil, errors.New("cannot copy a folder into itself")
 	}
-
-	var infos []*TreeEntry
-	if srcObj.IsDir() {
-		entries, err := d.listTree(ctx, src, true)
-		if err != nil {
-			return err
-		}
-		paths := make([]string, 0, len(entries))
-		for _, e := range entries {
-			if e.Type == "file" {
-				paths = append(paths, e.Path)
-			}
-		}
-		infos, err = d.pathsInfoMany(ctx, paths)
-		if err != nil {
-			return err
-		}
-	} else {
-		info, err := d.pathsInfo(ctx, src)
-		if err != nil {
-			return err
-		}
-		infos = []*TreeEntry{info}
+	infos, err := d.collectEntries(ctx, srcObj.IsDir(), src)
+	if err != nil {
+		return nil, err
 	}
-
 	ops := make([]commitOp, 0, len(infos))
 	for _, info := range infos {
 		rel := strings.TrimPrefix(info.Path, src)
@@ -402,7 +375,7 @@ func (d *HuggingFace) Copy(ctx context.Context, srcObj, dstDir model.Obj) error 
 		// small regular files: fetch the content and re-commit it
 		content, err := d.downloadFileContent(ctx, info.Path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ops = append(ops, commitOp{Key: "file", Value: map[string]any{
 			"path":     target,
@@ -410,7 +383,49 @@ func (d *HuggingFace) Copy(ctx context.Context, srcObj, dstDir model.Obj) error 
 			"encoding": "base64",
 		}})
 	}
-	return d.commit(ctx, ops, "OpenList copy "+src+" -> "+dst)
+	if err := d.commit(ctx, ops, "openlist copy "+src); err != nil {
+		return nil, err
+	}
+	return d.objByName(srcObj, stdpath.Join(dstDir.GetPath(), srcObj.GetName())), nil
+}
+
+// collectEntries returns metadata for src, expanding a directory to the
+// files it contains (with their LFS info).
+func (d *HuggingFace) collectEntries(ctx context.Context, isDir bool, src string) ([]*TreeEntry, error) {
+	if !isDir {
+		info, err := d.pathsInfo(ctx, src)
+		if err != nil {
+			return nil, err
+		}
+		if info == nil {
+			return nil, errs.ObjectNotFound
+		}
+		if info.Type == "directory" {
+			return d.collectEntries(ctx, true, src)
+		}
+		return []*TreeEntry{info}, nil
+	}
+	entries, err := d.listTree(ctx, src, true)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "file" {
+			paths = append(paths, e.Path)
+		}
+	}
+	return d.pathsInfoMany(ctx, paths)
+}
+
+// objByName mirrors srcObj's shape at a new path.
+func (d *HuggingFace) objByName(src model.Obj, path string) model.Obj {
+	return &model.Object{
+		Name:     src.GetName(),
+		Size:     src.GetSize(),
+		IsFolder: src.IsDir(),
+		Path:     utils.FixAndCleanPath(path),
+	}
 }
 
 // downloadFileContent fetches a file's content (used by Copy for small regular files).
@@ -425,19 +440,19 @@ func (d *HuggingFace) downloadFileContent(ctx context.Context, path string) ([]b
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("huggingface download failed: %s", res.Status)
+		return nil, fmt.Errorf("huggingface: download failed: %s", res.Status)
 	}
 	return io.ReadAll(res.Body)
 }
 
 var (
-	_ driver.Driver    = (*HuggingFace)(nil)
-	_ driver.Getter    = (*HuggingFace)(nil)
-	_ driver.Mkdir     = (*HuggingFace)(nil)
-	_ driver.Put       = (*HuggingFace)(nil)
-	_ driver.Remove    = (*HuggingFace)(nil)
-	_ driver.Move      = (*HuggingFace)(nil)
-	_ driver.Rename    = (*HuggingFace)(nil)
-	_ driver.Copy      = (*HuggingFace)(nil)
-	_ driver.GetRooter = (*HuggingFace)(nil)
+	_ driver.Driver       = (*HuggingFace)(nil)
+	_ driver.Getter       = (*HuggingFace)(nil)
+	_ driver.MkdirResult  = (*HuggingFace)(nil)
+	_ driver.PutResult    = (*HuggingFace)(nil)
+	_ driver.Remove       = (*HuggingFace)(nil)
+	_ driver.MoveResult   = (*HuggingFace)(nil)
+	_ driver.RenameResult = (*HuggingFace)(nil)
+	_ driver.CopyResult   = (*HuggingFace)(nil)
+	_ driver.GetRooter    = (*HuggingFace)(nil)
 )

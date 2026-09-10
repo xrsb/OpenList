@@ -14,11 +14,19 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:        "Hugging Face Hub",
-	LocalSort:   true,
-	DefaultRoot: "/",
-	// downloads of private repos need the Authorization header, so prefer the
-	// OpenList proxy to attach it; public links still work through it.
+	Name:              "Hugging Face Hub",
+	LocalSort:         true,
+	OnlyProxy:         false,
+	NoCache:           false,
+	NoUpload:          false,
+	NeedMs:            false,
+	DefaultRoot:       "/",
+	CheckStatus:       false,
+	Alert:             "",
+	NoOverwriteUpload: false,
+	NoLinkURL:         false,
+	// Private repos require an Authorization header on downloads; the OpenList
+	// proxy is what attaches it, so prefer proxied links.
 	PreferProxy: true,
 }
 

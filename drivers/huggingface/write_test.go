@@ -137,13 +137,13 @@ func TestWriteLifecycle(t *testing.T) {
 	root := &model.Object{Name: "/", IsFolder: true, Path: "/"}
 
 	// MakeDir
-	if err := d.MakeDir(ctx, root, "docs"); err != nil {
+	if _, err := d.MakeDir(ctx, root, "docs"); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
 
 	// upload small (regular) file
 	small := []byte("hello huggingface driver!\n")
-	if err := d.Put(ctx, root, makeStream(t, ctx, "hello.txt", small), nil); err != nil {
+	if _, err := d.Put(ctx, root, makeStream(t, ctx, "hello.txt", small), nil); err != nil {
 		t.Fatalf("Put small: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestWriteLifecycle(t *testing.T) {
 	if _, err := rand.Read(big); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Put(ctx, root, makeStream(t, ctx, "big.bin", big), nil); err != nil {
+	if _, err := d.Put(ctx, root, makeStream(t, ctx, "big.bin", big), nil); err != nil {
 		t.Fatalf("Put big: %v", err)
 	}
 
@@ -202,15 +202,15 @@ func TestWriteLifecycle(t *testing.T) {
 	}
 
 	// Rename
-	if err := d.Rename(ctx, &model.Object{Name: "hello.txt", Path: "/hello.txt"}, "renamed.txt"); err != nil {
+	if _, err := d.Rename(ctx, &model.Object{Name: "hello.txt", Path: "/hello.txt"}, "renamed.txt"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
 	// Move into docs/
-	if err := d.Move(ctx, &model.Object{Name: "renamed.txt", Path: "/renamed.txt"}, &model.Object{Name: "docs", IsFolder: true, Path: "/docs"}); err != nil {
+	if _, err := d.Move(ctx, &model.Object{Name: "renamed.txt", Path: "/renamed.txt"}, &model.Object{Name: "docs", IsFolder: true, Path: "/docs"}); err != nil {
 		t.Fatalf("Move: %v", err)
 	}
 	// Copy back to root
-	if err := d.Copy(ctx, &model.Object{Name: "renamed.txt", Path: "/docs/renamed.txt"}, root); err != nil {
+	if _, err := d.Copy(ctx, &model.Object{Name: "renamed.txt", Path: "/docs/renamed.txt"}, root); err != nil {
 		t.Fatalf("Copy: %v", err)
 	}
 
