@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
+	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
@@ -312,7 +313,7 @@ func (d *HuggingFace) lfsUpload(ctx context.Context, action LFSAction, r io.Read
 	}
 	defer res.Body.Close()
 	if up != nil {
-		up(1.0)
+		up(100)
 	}
 	if res.StatusCode != 200 {
 		rb, _ := io.ReadAll(res.Body)
@@ -377,7 +378,7 @@ func (d *HuggingFace) lfsUploadMultipart(ctx context.Context, oid string, act LF
 		res.Body.Close()
 		parts = append(parts, map[string]any{"etag": etag, "partNumber": i + 1})
 		if up != nil {
-			up(float64(end) / float64(size))
+			model.UpdateProgressWithRange(up, 60, 100)(float64(end) / float64(size) * 100)
 		}
 	}
 	body, _ := json.Marshal(map[string]any{"oid": oid, "parts": parts})

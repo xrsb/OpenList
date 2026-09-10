@@ -180,6 +180,7 @@ func (d *HuggingFace) MakeDir(ctx context.Context, parentDir model.Obj, dirName 
 
 // progressReader wraps a stream and reports upload progress; safe with a nil
 // callback (unlike stream.ReaderUpdatingProgress which panics on nil).
+// Reported values follow the driver contract: 0-100 percentage points.
 type progressReader struct {
 	r    io.Reader
 	size int64
@@ -199,13 +200,19 @@ func (p *progressReader) Read(b []byte) (int, error) {
 func (p *progressReader) GetSize() int64 { return p.size }
 
 // spoolToTemp streams src to a temp file, computing sha256 in the same pass.
+// Spooling is a local read and is fast for cached streams, so it is mapped to
+// the first 60% of the overall progress; the network upload phase (basic or
+// multipart) reports across the remaining 40% via UpdateProgressWithRange.
 func (d *HuggingFace) spoolToTemp(src io.Reader, size int64, up driver.UpdateProgress) (*os.File, string, int64, error) {
+	if up == nil {
+		up = func(float64) {} // UpdateProgressWithRange requires a non-nil inner
+	}
 	tmp, err := os.CreateTemp("", "huggingface-put-*")
 	if err != nil {
 		return nil, "", 0, err
 	}
 	hasher := sha256.New()
-	pr := &progressReader{r: src, size: size, up: up}
+	pr := &progressReader{r: src, size: size, up: model.UpdateProgressWithRange(up, 0, 60)}
 	n, err := io.Copy(tmp, io.TeeReader(pr, hasher))
 	if err != nil {
 		tmp.Close()
