@@ -258,8 +258,14 @@ func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 			return nil, err
 		}
-		if err := d.lfsUpload(ctx, act, io.NewSectionReader(tmp, 0, size), size, up); err != nil {
-			return nil, err
+		if isMultipartAction(act) {
+			if err := d.lfsUploadMultipart(ctx, oid, act, tmp, size, up); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := d.lfsUpload(ctx, act, io.NewSectionReader(tmp, 0, size), size, up); err != nil {
+				return nil, err
+			}
 		}
 		err = d.commit(ctx, []commitOp{{
 			Key: "lfsFile",

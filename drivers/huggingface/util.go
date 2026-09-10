@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	stdpath "path"
+	"strconv"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
@@ -242,13 +244,15 @@ func (d *HuggingFace) preupload(ctx context.Context, path string, size int64, sa
 	return "", fmt.Errorf("huggingface preupload: file %q not in response", path)
 }
 
-// lfsBatch requests git-lfs upload actions for a single object.
+// lfsBatch requests git-lfs upload actions for a single object. We advertise
+// both "basic" and "multipart" transfers: the Hub answers "basic" for files
+// under its ~5GB limit and "multipart" (chunked presigned uploads) above it.
 func (d *HuggingFace) lfsBatch(ctx context.Context, oid string, size int64) (map[string]LFSAction, error) {
 	prefix := repoTypeURLPrefix[d.RepoType]
 	url := fmt.Sprintf("%s/%s%s.git/info/lfs/objects/batch", Endpoint, prefix, d.RepoID)
 	payload := map[string]any{
 		"operation": "upload",
-		"transfers": []string{"basic"},
+		"transfers": []string{"basic", "multipart"},
 		"objects": []map[string]any{{
 			"oid":  oid,
 			"size": size,
@@ -313,6 +317,84 @@ func (d *HuggingFace) lfsUpload(ctx context.Context, action LFSAction, r io.Read
 	if res.StatusCode != 200 {
 		rb, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("huggingface lfs upload failed: %s: %s", res.Status, string(rb))
+	}
+	return nil
+}
+
+// isMultipartAction reports whether the batch response selected the chunked
+// upload protocol (files above the Hub's single-part limit).
+func isMultipartAction(act LFSAction) bool {
+	_, ok := act.Header["chunk_size"]
+	return ok
+}
+
+// lfsUploadMultipart uploads a large object in presigned chunks, then
+// completes the multipart session. Mirrors huggingface_hub's
+// lfs-multipart-upload transfer agent (HfApi) — each part gets an ETag
+// that is reported back in the completion call.
+func (d *HuggingFace) lfsUploadMultipart(ctx context.Context, oid string, act LFSAction, tmp *os.File, size int64, up driver.UpdateProgress) error {
+	chunkSize, err := strconv.ParseInt(act.Header["chunk_size"], 10, 64)
+	if err != nil || chunkSize <= 0 {
+		return fmt.Errorf("huggingface: invalid multipart chunk_size %q", act.Header["chunk_size"])
+	}
+	var partURLs []string
+	for i := 1; ; i++ {
+		u, ok := act.Header[fmt.Sprintf("%05d", i)]
+		if !ok {
+			break
+		}
+		partURLs = append(partURLs, u)
+	}
+	if len(partURLs) == 0 {
+		return fmt.Errorf("huggingface: multipart batch returned no part urls")
+	}
+	parts := make([]map[string]any, 0, len(partURLs))
+	for i, u := range partURLs {
+		start := int64(i) * chunkSize
+		if start >= size {
+			break
+		}
+		end := start + chunkSize
+		if end > size {
+			end = size
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, io.NewSectionReader(tmp, start, end-start))
+		if err != nil {
+			return err
+		}
+		req.ContentLength = end - start
+		req.Header.Set("User-Agent", userAgent)
+		res, err := d.client.Do(req)
+		if err != nil {
+			return err
+		}
+		if res.StatusCode != 200 && res.StatusCode != 201 {
+			rb, _ := io.ReadAll(res.Body)
+			res.Body.Close()
+			return fmt.Errorf("huggingface multipart part %d failed: %s: %s", i+1, res.Status, string(rb))
+		}
+		etag := res.Header.Get("ETag")
+		res.Body.Close()
+		parts = append(parts, map[string]any{"etag": etag, "partNumber": i + 1})
+		if up != nil {
+			up(float64(end) / float64(size))
+		}
+	}
+	body, _ := json.Marshal(map[string]any{"oid": oid, "parts": parts})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, act.Href, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", userAgent)
+	res, err := d.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 && res.StatusCode != 201 {
+		rb, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("huggingface multipart complete failed: %s: %s", res.Status, string(rb))
 	}
 	return nil
 }
