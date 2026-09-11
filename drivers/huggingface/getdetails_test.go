@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
@@ -64,15 +65,27 @@ func TestGetDetailsRealUpload(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	details, err := d.GetDetails(ctx)
-	if err != nil {
-		t.Fatalf("GetDetails: %v", err)
+	// The Hub's official accounting lags uploads by a few seconds; poll.
+	deadline := time.Now().Add(60 * time.Second)
+	var used int64
+	var total int64
+	for {
+		details, err := d.GetDetails(ctx)
+		if err != nil {
+			t.Fatalf("GetDetails: %v", err)
+		}
+		used = details.UsedSpace
+		total = details.TotalSpace
+		if used >= size || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(1 * time.Second)
 	}
-	if details.TotalSpace != int64(100)*1000*1000*1000 {
-		t.Fatalf("total = %d, want 100GB", details.TotalSpace)
+	if total != int64(100)*1000*1000*1000 {
+		t.Fatalf("total = %d, want 100GB", total)
 	}
-	if details.UsedSpace < size {
-		t.Fatalf("used = %d, want >= %d after upload", details.UsedSpace, size)
+	if used < size {
+		t.Fatalf("used = %d, want >= %d after upload", used, size)
 	}
-	t.Logf("after %d-byte upload: used=%d (%.3f GiB)", size, details.UsedSpace, float64(details.UsedSpace)/(1<<30))
+	t.Logf("after %d-byte upload: used=%d (%.3f GiB)", size, used, float64(used)/(1<<30))
 }

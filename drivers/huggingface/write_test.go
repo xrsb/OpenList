@@ -344,3 +344,61 @@ func TestRemoveReclaimsLFSSpace(t *testing.T) {
 		time.Sleep(1 * time.Second)
 	}
 }
+
+// TestGetDetailsUsesOfficialUsage verifies the capacity bar comes from the
+// Hub's own accounting (usedStorage/size), never from local computation.
+func TestGetDetailsUsesOfficialUsage(t *testing.T) {
+	ctx := context.Background()
+	token := writeToken(t)
+	repo := userTestRepo(t, token)
+
+	d := &HuggingFace{}
+	d.Addition.RepoType = "model"
+	d.Addition.RepoID = repo
+	d.Addition.Revision = "main"
+	d.Addition.Token = token
+	if err := d.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	root := &model.Object{Name: "/", IsFolder: true, Path: "/"}
+	big := make([]byte, 6<<20)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Put(ctx, root, makeStream(t, ctx, "big.bin", big), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// The Hub's accounting lags the upload by a couple of seconds; poll.
+	deadline := time.Now().Add(60 * time.Second)
+	var got int64
+	for {
+		details, err := d.GetDetails(ctx)
+		if err != nil {
+			t.Fatalf("GetDetails: %v", err)
+		}
+		got = details.UsedSpace
+		if got >= int64(len(big)) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	if got < int64(len(big)) {
+		t.Fatalf("official used (%d) never reached uploaded size (%d); fallback local sum would have been instant", got, len(big))
+	}
+	if got > int64(len(big))*2 {
+		t.Fatalf("official used (%d) suspiciously larger than 1 uploaded file (%d)", got, len(big))
+	}
+	const quota = int64(100) * 1000 * 1000 * 1000
+	details, err := d.GetDetails(ctx)
+	if err != nil {
+		t.Fatalf("GetDetails: %v", err)
+	}
+	if details.TotalSpace != quota {
+		t.Fatalf("TotalSpace = %d, want documented free quota %d", details.TotalSpace, quota)
+	}
+	if details.UsedSpace != got {
+		t.Fatalf("UsedSpace = %d, want %d", details.UsedSpace, got)
+	}
+}

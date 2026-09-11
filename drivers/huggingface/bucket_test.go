@@ -245,11 +245,18 @@ func TestBucketLifecycle(t *testing.T) {
 		t.Fatalf("nested file survived dir removal")
 	}
 
-	// GetDetails (used space grows with the files we uploaded; overwritten +
-	// removed files shrink again, so just check it holds the big file)
-	det, err := d.GetDetails(ctx)
-	if err != nil {
-		t.Fatalf("GetDetails: %v", err)
+	// GetDetails (official bucket size lags uploads a few seconds; poll)
+	deadline := time.Now().Add(60 * time.Second)
+	var det *model.StorageDetails
+	for {
+		det, err = d.GetDetails(ctx)
+		if err != nil {
+			t.Fatalf("GetDetails: %v", err)
+		}
+		if det.UsedSpace >= int64(len(mid)) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(1 * time.Second)
 	}
 	if det.TotalSpace <= 0 || det.UsedSpace < int64(len(mid)) {
 		t.Fatalf("GetDetails = %+v", det)
