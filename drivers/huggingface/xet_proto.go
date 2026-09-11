@@ -133,7 +133,7 @@ const xetShardFlags = 0x80000000
 //	         FileDataSequenceEntry × N (48 each)
 //	         FileVerificationEntry × N (48 each)
 //	         bookend(48)
-//	cas:     CASChunkSequenceHeader(48) per xorb
+//	cas:     CASChunkSequenceHeader(48) per xorb (sorted by xorb hash)
 //	         (hash32 + flags u32 + num_entries u32
 //	          + num_bytes_in_cas u32 + num_bytes_on_disk u32)
 //	         CASChunkSequenceEntry × num_entries (48 each)
@@ -156,6 +156,8 @@ func buildShard(allPairs []xetHashSize, xorbs []xetXorbMeta) []byte {
 	binary.LittleEndian.PutUint32(fh[0:4], xetShardFlags)
 	binary.LittleEndian.PutUint32(fh[4:8], uint32(len(xorbs)))
 	b.Write(fh[:])
+
+	// 1. All FileDataSequenceEntries first
 	for _, x := range xorbs {
 		var segBytes uint64
 		for _, p := range x.pairs {
@@ -166,6 +168,10 @@ func buildShard(allPairs []xetHashSize, xorbs []xetXorbMeta) []byte {
 		binary.LittleEndian.PutUint32(e[36:40], uint32(segBytes))
 		binary.LittleEndian.PutUint32(e[44:48], uint32(len(x.pairs))) // chunk_index_end
 		b.Write(e[:])
+	}
+
+	// 2. All FileVerificationEntries second (one per FileDataSequenceEntry)
+	for _, x := range xorbs {
 		var ve [48]byte // range_hash(32) + zeros(16)
 		rv := xetRangeHash(x.pairs)
 		copy(ve[0:32], rv[:])
