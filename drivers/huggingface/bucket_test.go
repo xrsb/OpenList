@@ -277,5 +277,52 @@ func TestBucketPathsInfo(t *testing.T) {
 	}
 }
 
+// TestBucketLinkSignedRedirect locks the download-link contract: for a
+// private bucket, Link must exchange our token for the Hub's signed CDN
+// redirect so browsers can fetch the file with NO Authorization header
+// (OpenList web_proxy stays off; no server-relayed traffic).
+func TestBucketLinkSignedRedirect(t *testing.T) {
+	ctx := context.Background()
+	token := writeToken(t)
+	name := createTestBucket(t, token)
+	d := bucketDriver(t, token, name)
+	if err := d.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	root := &model.Object{Name: "/", IsFolder: true, Path: "/"}
+	payload := []byte("signed-redirect-check: " + name)
+	if _, err := d.Put(ctx, root, makeStream(t, ctx, "dl.bin", payload), nil); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := d.Get(ctx, "/dl.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := d.Link(ctx, obj, model.LinkArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.URL == "" || strings.Contains(link.URL, "/resolve/") {
+		t.Fatalf("Link URL not a signed CDN redirect: %s", link.URL)
+	}
+	if strings.HasPrefix(link.URL, Endpoint) && !strings.Contains(link.URL, "cdn") {
+		t.Fatalf("Link URL still points at the Hub (would need auth): %s", link.URL)
+	}
+	// fetch without any Authorization header, exactly like a browser would
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("signed CDN fetch: %s: %s", res.Status, b)
+	}
+	if !bytes.Equal(b, payload) {
+		t.Fatalf("payload mismatch via signed link: %d bytes", len(b))
+	}
+}
+
 // silence unused-import guard (rand used in this file's plans)
 var _ = rand.Read

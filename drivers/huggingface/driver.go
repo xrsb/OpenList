@@ -9,8 +9,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	stdpath "path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -134,18 +136,74 @@ func (d *HuggingFace) List(ctx context.Context, dir model.Obj, args model.ListAr
 
 func (d *HuggingFace) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
 	if d.isBucket() {
-		link := &model.Link{URL: d.bucketResolveURL(d.bucketKey(file.GetPath()))}
-		if t := strings.TrimSpace(d.Token); t != "" {
-			link.Header = http.Header{}
-			link.Header.Set("Authorization", "Bearer "+t)
-		}
+		return d.resolveLink(ctx, d.bucketResolveURL(d.bucketKey(file.GetPath())))
+	}
+	return d.resolveLink(ctx, d.resolveURL(d.repoPath(file.GetPath())))
+}
+
+// noRedirectClient stops at the first 3xx so we can harvest the redirect
+// target (a signed CDN URL) instead of following it.
+var noRedirectClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// resolveLink turns a Hub resolve URL into a playable link.
+//
+// The Hub never puts credentials in the URL: for private repos/buckets the
+// resolve endpoint answers 302 with a short-lived signed CDN URL that needs
+// no Authorization header. We exchange our token for that signed URL so the
+// browser downloads straight from the CDN and OpenList does not have to
+// relay the bytes (web_proxy can stay off). When no token is configured the
+// raw resolve URL is public and is returned as-is. On any unexpected status
+// we fall back to the plain URL plus the Authorization header, which OpenList
+// can still relay if the mount is set to web_proxy.
+func (d *HuggingFace) resolveLink(ctx context.Context, resolveURL string) (*model.Link, error) {
+	t := strings.TrimSpace(d.Token)
+	link := &model.Link{URL: resolveURL}
+	if t == "" {
+		return link, nil // public: no auth needed, direct link works
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, resolveURL, nil)
+	if err != nil {
 		return link, nil
 	}
-	link := &model.Link{URL: d.resolveURL(d.repoPath(file.GetPath()))}
-	if t := strings.TrimSpace(d.Token); t != "" {
+	req.Header.Set("Authorization", "Bearer "+t)
+	res, err := noRedirectClient.Do(req)
+	if err != nil {
+		return link, nil
+	}
+	res.Body.Close()
+	switch res.StatusCode {
+	case http.StatusFound, http.StatusMovedPermanently,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		if loc := res.Header.Get("Location"); loc != "" {
+			// signed CDN URL, no header needed. Propagate its Expires so
+			// OpenList's link cache never hands out a stale signed URL.
+			link := &model.Link{URL: loc}
+			if u, err := url.Parse(loc); err == nil {
+				if exp := u.Query().Get("Expires"); exp != "" {
+					if sec, err := strconv.ParseInt(exp, 10, 64); err == nil {
+						d := time.Until(time.Unix(sec, 0)) - 30*time.Second
+						if d > 0 {
+							link.Expiration = &d
+						}
+					}
+				}
+			}
+			return link, nil
+		}
+	case http.StatusOK:
+		// served inline; keep URL but require auth on fetch
 		link.Header = http.Header{}
 		link.Header.Set("Authorization", "Bearer "+t)
+		return link, nil
 	}
+	// unexpected status: hand back URL + header; a proxied mount will surface
+	// the exact upstream error, an unproxied one will show a clean failure.
+	link.Header = http.Header{}
+	link.Header.Set("Authorization", "Bearer "+t)
 	return link, nil
 }
 
