@@ -44,9 +44,9 @@ func (d *HuggingFace) Init(ctx context.Context) error {
 		return errors.New("repo_id must be in the form 'namespace/name'")
 	}
 	switch d.RepoType {
-	case "model", "dataset", "space":
+	case "model", "dataset", "space", "bucket":
 	default:
-		return errors.New("repo_type must be one of model, dataset, space")
+		return errors.New("repo_type must be one of model, dataset, space, bucket")
 	}
 	d.Revision = strings.TrimSpace(d.Revision)
 	if d.Revision == "" {
@@ -56,7 +56,11 @@ func (d *HuggingFace) Init(ctx context.Context) error {
 	d.client = &http.Client{Timeout: 48 * time.Hour}
 
 	// verify the repository is reachable (existence / token permission)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.apiURL(), nil)
+	verifyURL := d.apiURL()
+	if d.isBucket() {
+		verifyURL = d.bucketAPIURL()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, verifyURL, nil)
 	if err != nil {
 		return errors.Wrap(err, "huggingface: cannot build request")
 	}
@@ -98,6 +102,9 @@ func (d *HuggingFace) GetRoot(ctx context.Context) (model.Obj, error) {
 /* ---------- read ---------- */
 
 func (d *HuggingFace) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
+	if d.isBucket() {
+		return d.bucketList(ctx, dir)
+	}
 	entries, err := d.listTree(ctx, d.repoPath(dir.GetPath()), false)
 	if err != nil {
 		// an implicit Hub folder may not exist yet -> treat as empty
@@ -126,6 +133,14 @@ func (d *HuggingFace) List(ctx context.Context, dir model.Obj, args model.ListAr
 }
 
 func (d *HuggingFace) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
+	if d.isBucket() {
+		link := &model.Link{URL: d.bucketResolveURL(d.bucketKey(file.GetPath()))}
+		if t := strings.TrimSpace(d.Token); t != "" {
+			link.Header = http.Header{}
+			link.Header.Set("Authorization", "Bearer "+t)
+		}
+		return link, nil
+	}
 	link := &model.Link{URL: d.resolveURL(d.repoPath(file.GetPath()))}
 	if t := strings.TrimSpace(d.Token); t != "" {
 		link.Header = http.Header{}
@@ -135,6 +150,9 @@ func (d *HuggingFace) Link(ctx context.Context, file model.Obj, args model.LinkA
 }
 
 func (d *HuggingFace) Get(ctx context.Context, path string) (model.Obj, error) {
+	if d.isBucket() {
+		return d.bucketGet(ctx, path)
+	}
 	info, err := d.pathsInfo(ctx, d.repoPath(path))
 	if err != nil {
 		return nil, err
@@ -167,6 +185,11 @@ func (d *HuggingFace) dirObj(path string) model.Obj {
 /* ---------- write ---------- */
 
 func (d *HuggingFace) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
+	if d.isBucket() {
+		// Buckets have no real directories: keys are plain prefixes, so a
+		// folder exists as soon as a file is uploaded below it.
+		return d.dirObj(stdpath.Join(parentDir.GetPath(), dirName)), nil
+	}
 	// Hub folders are implicit: write a .gitkeep placeholder so the folder
 	// actually appears in listings (same trick as the GitHub driver).
 	path := d.repoPath(stdpath.Join(parentDir.GetPath(), dirName, ".gitkeep"))
@@ -229,6 +252,9 @@ func (d *HuggingFace) spoolToTemp(src io.Reader, size int64, up driver.UpdatePro
 }
 
 func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
+	if d.isBucket() {
+		return d.bucketPut(ctx, dstDir, stream, up)
+	}
 	path := d.repoPath(stdpath.Join(dstDir.GetPath(), stream.GetName()))
 
 	tmp, oid, size, err := d.spoolToTemp(stream, stream.GetSize(), up)
@@ -315,6 +341,9 @@ func (d *HuggingFace) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 }
 
 func (d *HuggingFace) Remove(ctx context.Context, obj model.Obj) error {
+	if d.isBucket() {
+		return d.bucketRemove(ctx, obj)
+	}
 	path := d.repoPath(obj.GetPath())
 
 	// Collect the LFS oids of the subtree BEFORE the delete commit: once the
@@ -379,6 +408,9 @@ func (d *HuggingFace) collectLFS(ctx context.Context, folder model.Obj) ([]strin
 }
 
 func (d *HuggingFace) Rename(ctx context.Context, srcObj model.Obj, newName string) (model.Obj, error) {
+	if d.isBucket() {
+		return d.bucketRename(ctx, srcObj, newName)
+	}
 	src := d.repoPath(srcObj.GetPath())
 	dst := d.repoPath(stdpath.Join(stdpath.Dir(srcObj.GetPath()), newName))
 	if err := d.moveOrRename(ctx, srcObj.IsDir(), src, dst); err != nil {
@@ -388,6 +420,9 @@ func (d *HuggingFace) Rename(ctx context.Context, srcObj model.Obj, newName stri
 }
 
 func (d *HuggingFace) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
+	if d.isBucket() {
+		return d.bucketMove(ctx, srcObj, dstDir)
+	}
 	src := d.repoPath(srcObj.GetPath())
 	dst := d.repoPath(stdpath.Join(dstDir.GetPath(), srcObj.GetName()))
 	if strings.HasPrefix(dst, src+"/") {
@@ -418,6 +453,9 @@ func (d *HuggingFace) moveOrRename(ctx context.Context, isDir bool, src, dst str
 }
 
 func (d *HuggingFace) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
+	if d.isBucket() {
+		return d.bucketCopy(ctx, srcObj, dstDir)
+	}
 	src := d.repoPath(srcObj.GetPath())
 	dst := d.repoPath(stdpath.Join(dstDir.GetPath(), srcObj.GetName()))
 	if strings.HasPrefix(dst, src+"/") {

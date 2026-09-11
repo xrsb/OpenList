@@ -32,11 +32,22 @@ type treeEntry struct {
 // real byte count: every LFS blob stored for the repo plus the plain
 // (non-LFS) blobs reachable from the current revision's tree.
 func (d *HuggingFace) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
-	used, err := d.usedStorage(ctx)
-	if err != nil {
-		return nil, err
-	}
 	const freeQuota = int64(100) * 1000 * 1000 * 1000 // 100 GB, decimal (Hub's documented free tier)
+	var used int64
+	var err error
+	if d.isBucket() {
+		// Buckets report exact usage directly from the API.
+		info, e := d.bucketInfoAPI(ctx)
+		if e != nil {
+			return nil, e
+		}
+		used = info.Size
+	} else {
+		used, err = d.usedStorage(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &model.StorageDetails{
 		DiskUsage: model.DiskUsage{
 			TotalSpace: freeQuota,

@@ -7,7 +7,7 @@ import (
 
 type Addition struct {
 	driver.RootPath
-	RepoType string `json:"repo_type" type:"select" options:"model,dataset,space" default:"model" help:"Repository type on the Hub."`
+	RepoType string `json:"repo_type" type:"select" options:"model,dataset,space,bucket" default:"model" help:"Repository type on the Hub. Choose bucket for fast mutable object storage."`
 	RepoID   string `json:"repo_id" type:"string" required:"true" help:"Namespace and repository name, e.g. username/my-repo"`
 	Revision string `json:"revision" type:"string" default:"main" help:"Branch name, tag or commit SHA to mount."`
 	Token    string `json:"token" type:"string" help:"User Access Token with write permission. Required for private repos and for any write operation."`
