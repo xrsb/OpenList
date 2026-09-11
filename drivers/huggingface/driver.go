@@ -30,6 +30,19 @@ type HuggingFace struct {
 	client *http.Client
 }
 
+var (
+	_ driver.Driver      = (*HuggingFace)(nil)
+	_ driver.GetRooter   = (*HuggingFace)(nil)
+	_ driver.Getter      = (*HuggingFace)(nil)
+	_ driver.MkdirResult = (*HuggingFace)(nil)
+	_ driver.MoveResult  = (*HuggingFace)(nil)
+	_ driver.RenameResult = (*HuggingFace)(nil)
+	_ driver.CopyResult  = (*HuggingFace)(nil)
+	_ driver.PutResult   = (*HuggingFace)(nil)
+	_ driver.Remove      = (*HuggingFace)(nil)
+	_ driver.WithDetails = (*HuggingFace)(nil)
+)
+
 /* ---------- meta ---------- */
 
 func (d *HuggingFace) Config() driver.Config {

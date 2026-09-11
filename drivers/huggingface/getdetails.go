@@ -44,10 +44,14 @@ func (d *HuggingFace) GetDetails(ctx context.Context) (*model.StorageDetails, er
 		}
 		used = ri.UsedStorage
 	}
+	total := freeQuota
+	if used > total {
+		total = used
+	}
 	return &model.StorageDetails{
 		DiskUsage: model.DiskUsage{
-			TotalSpace: freeQuota,
-			UsedSpace:  min(used, freeQuota),
+			TotalSpace: total,
+			UsedSpace:  used,
 		},
 	}, nil
 }

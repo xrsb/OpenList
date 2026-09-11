@@ -25,9 +25,9 @@ var config = driver.Config{
 	Alert:             "",
 	NoOverwriteUpload: false,
 	NoLinkURL:         false,
-	// Private repos require an Authorization header on downloads; the OpenList
-	// proxy is what attaches it, so prefer proxied links.
-	PreferProxy: true,
+	// Link() exchanges tokens for pre-signed CDN URLs so direct downloads work
+	// without relaying through the server (web_proxy can stay off).
+	PreferProxy: false,
 }
 
 func init() {
